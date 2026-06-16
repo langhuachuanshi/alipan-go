@@ -76,14 +76,20 @@ type CreateShareLinkResponse struct {
 	FirstFile   *types.ShareLinkBaseFile `json:"first_file"`
 }
 
-// Create 创建分享链接。
+// Create 创建分享链接，返回官方 /s/ 分享链接（多人可访问转存）。
+//
+// 重要：分享要求文件在【资源盘】，备份盘的文件不允许分享（返回 403）。
+// 若 DriveID 为空，自动使用资源盘 ID。
 func (s *Service) Create(ctx context.Context, req *CreateShareLinkRequest) (*CreateShareLinkResponse, error) {
 	if req == nil || len(req.FileIDList) == 0 {
 		return nil, invoker.NewAPIError(0, "InvalidArgument", "file_id_list is required")
 	}
-	// drive_id 为空时自动填默认网盘（服务端要求）。
+	// drive_id 为空时自动用资源盘（备份盘不允许分享）。
 	if req.DriveID == "" {
-		req.DriveID = s.inv.DefaultDriveID()
+		req.DriveID = s.inv.ResourceDriveID()
+		if req.DriveID == "" {
+			return nil, invoker.NewAPIError(0, "NoResourceDrive", "分享需要资源盘，但账号未找到资源盘 drive")
+		}
 	}
 	var resp CreateShareLinkResponse
 	if err := invoker.PostAndDecode(ctx, s.inv, pathShareLinkCreate, req, &resp, []int{200}); err != nil {

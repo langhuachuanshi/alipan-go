@@ -16,6 +16,8 @@ type options struct {
 	defaultDriveID  string
 	loginMethod     auth.LoginMethod
 	webPort         int
+	loginTimeout    time.Duration
+	showQR          func(string) error
 	requestInterval time.Duration
 	retryMax        int
 }
@@ -64,3 +66,10 @@ func WithRequestInterval(d time.Duration) Option { return func(o *options) { o.r
 
 // WithRetryMax 设置最大重试次数。
 func WithRetryMax(n int) Option { return func(o *options) { o.retryMax = n } }
+
+// WithLoginTimeout 设置扫码登录超时（默认 5 分钟）。
+func WithLoginTimeout(d time.Duration) Option { return func(o *options) { o.loginTimeout = d } }
+
+// WithShowQR 自定义二维码展示回调。回调接收二维码内容字符串，自行渲染/保存/展示。
+// 适用于终端块状二维码扫不出的场景（如保存为 PNG 图片供手机扫描）。
+func WithShowQR(fn func(content string) error) Option { return func(o *options) { o.showQR = fn } }

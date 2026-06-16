@@ -83,25 +83,28 @@ type ImageMedia struct {
 
 // VideoMedia 视频元数据。
 type VideoMedia struct {
-	Duration    float64               `json:"duration"`
-	Width       int64                 `json:"width"`
-	Height      int64                 `json:"height"`
-	Title       string                `json:"title"`
-	VideoStream *VideoMediaVideoStream `json:"video_media_video_stream"`
-	AudioStream *VideoMediaAudioStream `json:"video_media_audio_stream"`
+	Duration    float64                 `json:"duration"`
+	Width       int64                   `json:"width"`
+	Height      int64                   `json:"height"`
+	Title       string                  `json:"title"`
+	// 注意：服务端返回的是数组（一个视频可能有多个流）。
+	VideoStream []VideoMediaVideoStream `json:"video_media_video_stream"`
+	AudioStream []VideoMediaAudioStream `json:"video_media_audio_stream"`
 }
 
 // VideoMediaVideoStream 视频流信息。
+// 注意：阿里云盘对这些字段类型不固定（fps 可能是字符串也可能数字），
+// 故数值字段用 any 兼容。
 type VideoMediaVideoStream struct {
-	Codec   string  `json:"codec"`
-	Bitrate float64 `json:"bitrate"`
-	Fps     float64 `json:"fps"`
+	Codec   any `json:"codec"`
+	Bitrate any `json:"bitrate"`
+	Fps     any `json:"fps"`
 }
 
 // VideoMediaAudioStream 音频流信息。
 type VideoMediaAudioStream struct {
-	Codec   string  `json:"codec"`
-	Bitrate float64 `json:"bitrate"`
+	Codec   any `json:"codec"`
+	Bitrate any `json:"bitrate"`
 }
 
 // VideoPreview 视频预览元数据。

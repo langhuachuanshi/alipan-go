@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/langhuachuanshi/alipan-go/alipan/invoker"
@@ -24,6 +26,50 @@ var ErrLoginFailed = invoker.NewAPIError(0, "LoginFailed", "qr code login failed
 
 // ErrRefreshFailed token 刷新失败。
 var ErrRefreshFailed = invoker.NewAPIError(0, "RefreshFailed", "refresh token failed")
+
+// debugLog 控制扫码登录的调试输出。测试期间可设为 true 排查问题。
+var debugLog = false
+
+// DebugLogin 开启/关闭扫码登录的调试日志。
+func DebugLogin(on bool) { debugLog = on }
+
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[auth] "+format+"\n", args...)
+}
+
+// keysOf 返回 map 的 key 列表（用于调试）。
+func keysOf(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
+// anyToStr 把任意值转成字符串，正确处理 json.Unmarshal 产生的 float64 数字。
+// 关键：时间戳等大整数会被解析成 float64（如 1.78e12），必须格式化成整数字符串，
+// 不能用 %v（会输出科学计数法），否则服务端解析失败返回 HTML 错误页。
+func anyToStr(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		// 整数值的 float64 → 整数字符串。
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
 
 // Login 执行登录决策。返回登录产物（含 token）。
 //
@@ -131,14 +177,21 @@ func loginByQrcode(ctx context.Context, cfg *Config) (*types.Token, error) {
 		return nil, err
 	}
 
-	switch cfg.LoginMethod {
-	case LoginWeb:
-		if err := sess.showQrcodeWeb(ctx, cfg.WebPort, sess.qr.CodeContent); err != nil {
+	// 展示二维码：优先用自定义回调，否则按 LoginMethod 走默认。
+	if cfg.ShowQR != nil {
+		if err := cfg.ShowQR(sess.qr.CodeContent); err != nil {
 			return nil, err
 		}
-		defer sess.stopWeb()
-	default:
-		showQrcodeTerminal(sess.qr.CodeContent)
+	} else {
+		switch cfg.LoginMethod {
+		case LoginWeb:
+			if err := sess.showQrcodeWeb(ctx, cfg.WebPort, sess.qr.CodeContent); err != nil {
+				return nil, err
+			}
+			defer sess.stopWeb()
+		default:
+			showQrcodeTerminal(sess.qr.CodeContent)
+		}
 	}
 
 	confirmed, err := sess.pollStatus(ctx, loginTimeout(cfg))
@@ -158,7 +211,10 @@ func loginByQrcode(ctx context.Context, cfg *Config) (*types.Token, error) {
 }
 
 func loginTimeout(cfg *Config) time.Duration {
-	return 2 * time.Minute
+	if cfg.LoginTimeout > 0 {
+		return cfg.LoginTimeout
+	}
+	return 5 * time.Minute
 }
 
 // —— 扫码会话 ——
@@ -218,24 +274,24 @@ func (s *loginSession) generateQrcode(ctx context.Context) error {
 	var gen struct {
 		Content struct {
 			HasError bool `json:"hasError"`
-			Data     struct {
-				CodeContent string `json:"codeContent"`
-				Title       string `json:"title"`
-			} `json:"data"`
+			Data     map[string]any `json:"data"`
 		} `json:"content"`
 	}
 	if err := json.NewDecoder(resp2.Body).Decode(&gen); err != nil {
 		return fmt.Errorf("alipan: decode qrcode generate failed: %w", err)
 	}
-	if gen.Content.HasError || gen.Content.Data.CodeContent == "" {
+	codeContent, _ := gen.Content.Data["codeContent"].(string)
+	if gen.Content.HasError || codeContent == "" {
 		return fmt.Errorf("alipan: qrcode generate returned empty codeContent")
 	}
+	// 关键：必须把 generate.do 返回的完整 data 对象原样保存，作为 query.do 的请求体。
+	// data 里除 codeContent/title 外，还含 ck、t 等会话凭证，丢失会导致 query.do 一直失败。
 	s.qr = &qrcodeInfo{
-		CodeContent: gen.Content.Data.CodeContent,
-		Raw: map[string]any{
-			"codeContent": gen.Content.Data.CodeContent,
-			"title":       gen.Content.Data.Title,
-		},
+		CodeContent: codeContent,
+		Raw:         gen.Content.Data,
+	}
+	if debugLog {
+		logf("generate.do data 字段: %v", keysOf(gen.Content.Data))
 	}
 	return nil
 }
@@ -243,6 +299,7 @@ func (s *loginSession) generateQrcode(ctx context.Context) error {
 func (s *loginSession) pollStatus(ctx context.Context, timeout time.Duration) (*confirmedInfo, error) {
 	queryURL := HostPassport + PathQrcodeQuery + "?appName=" + AppName
 	deadline := time.Now().Add(timeout)
+	pollCount := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -250,22 +307,44 @@ func (s *loginSession) pollStatus(ctx context.Context, timeout time.Duration) (*
 		if time.Now().After(deadline) {
 			return nil, ErrLoginFailed
 		}
+		// 用 form-encoded 回传完整 data 对象（对齐 aligo 的 data=data）。
+		// 注意：json.Unmarshal 到 map[string]any 后，数字变成 float64，
+		// 必须格式化成整数字符串（不能用 %v，否则时间戳变成科学计数法）。
 		form := url.Values{}
 		for k, v := range s.qr.Raw {
-			if str, ok := v.(string); ok {
-				form.Set(k, str)
-			}
+			form.Set(k, anyToStr(v))
 		}
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, queryURL, bytes.NewReader([]byte(form.Encode())))
+		encodedForm := form.Encode()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, queryURL, bytes.NewReader([]byte(encodedForm)))
 		setCommonHeaders(req)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		// passport 域接口需要 passport 的 Referer，否则可能被重定向到 HTML 登录页。
+		req.Header.Set("Referer", "https://passport.aliyundrive.com/")
+		req.Header.Set("Origin", "https://passport.aliyundrive.com")
+		if debugLog && pollCount == 0 {
+			logf("query.do 发送 form: %s", encodedForm)
+		}
 
 		resp, err := s.httpClient.Do(req)
 		if err != nil {
+			if debugLog {
+				logf("query.do 网络错误: %v", err)
+			}
 			if ctxErr := sleepCtx(ctx, 3*time.Second); ctxErr != nil {
 				return nil, ctxErr
 			}
 			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		pollCount++
+		if debugLog && pollCount <= 3 {
+			// 前 3 次打印原始响应，便于排查结构。
+			bs := string(body)
+			if len(bs) > 300 {
+				bs = bs[:300] + "..."
+			}
+			logf("query.do #%d status=%d body=%s", pollCount, resp.StatusCode, bs)
 		}
 		var q struct {
 			Content struct {
@@ -276,19 +355,33 @@ func (s *loginSession) pollStatus(ctx context.Context, timeout time.Duration) (*
 				} `json:"data"`
 			} `json:"content"`
 		}
-		decErr := json.NewDecoder(resp.Body).Decode(&q)
-		resp.Body.Close()
-		if decErr != nil {
+		if err := json.Unmarshal(body, &q); err != nil {
+			if debugLog {
+				logf("query.do 解析失败: %v", err)
+			}
 			if ctxErr := sleepCtx(ctx, 3*time.Second); ctxErr != nil {
 				return nil, ctxErr
 			}
 			continue
 		}
 		switch q.Content.Data.QrCodeStatus {
-		case "NEW", "SCANED":
+		case "NEW":
+			if debugLog && pollCount == 1 {
+				logf("qrCodeStatus=NEW (等待扫码)")
+			}
+		case "SCANED":
+			if debugLog {
+				logf("qrCodeStatus=SCANED (已扫码，等待手机确认)")
+			}
 		case "CONFIRMED":
+			if debugLog {
+				logf("qrCodeStatus=CONFIRMED (登录已确认)")
+			}
 			return &confirmedInfo{BizExt: q.Content.Data.BizExt}, nil
 		default:
+			if debugLog {
+				logf("qrCodeStatus=%s hasError=%v", q.Content.Data.QrCodeStatus, q.Content.HasError)
+			}
 			if q.Content.HasError {
 				return nil, ErrLoginFailed
 			}

@@ -5,6 +5,8 @@
 package auth
 
 import (
+	"time"
+
 	"github.com/langhuachuanshi/alipan-go/alipan/types"
 )
 
@@ -48,6 +50,10 @@ type Config struct {
 	DefaultDrive  string        // 默认网盘 ID
 	LoginMethod   LoginMethod
 	WebPort       int
+	LoginTimeout  time.Duration // 扫码登录超时，默认 5 分钟
+	// ShowQR 自定义二维码展示回调。为 nil 时按 LoginMethod 走终端/网页默认实现。
+	// content 是二维码原始内容字符串（阿里自定义 qr 协议），由回调负责渲染/保存/展示。
+	ShowQR func(content string) error
 }
 
 // Result 是登录后的产物。

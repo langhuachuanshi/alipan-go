@@ -90,6 +90,8 @@ func New(ctx context.Context, opts ...Option) (*Client, error) {
 		DefaultDrive: o.defaultDriveID,
 		LoginMethod:  o.loginMethod,
 		WebPort:      o.webPort,
+		LoginTimeout: o.loginTimeout,
+		ShowQR:       o.showQR,
 	}
 	result, err := auth.Login(ctx, authCfg)
 	if err != nil {

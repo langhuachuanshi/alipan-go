@@ -25,8 +25,9 @@ type DownloadRequest struct {
 }
 
 const (
-	downloadChunkSize  = 1024 * 1024
-	downloadTempSuffix = ".ali"
+	downloadChunkSize     = 1024 * 1024
+	downloadTempSuffix    = ".ali"
+	downloadHeaderTimeout = 30 * time.Second // 等待响应头的保底超时，body 读取不受限
 )
 
 // GetDownloadURL 获取下载链接。
@@ -45,6 +46,12 @@ func (s *Service) GetDownloadURL(ctx context.Context, fileID, driveID string) (s
 }
 
 // Download 下载文件，支持断点续传。
+//
+// 注意：下载使用流式传输，整体耗时取决于文件大小和网络，不应套用固定整体超时。
+// 为防止 OSS 直链偶发挂起导致永久阻塞：
+//   - 调用方应传入可取消/带 deadline 的 context（如 context.WithTimeout/WithCancel）。
+//   - 内部已对「等待响应头」设了保底超时（downloadHeaderTimeout），但 body 读取阶段
+//     仍依赖 ctx 取消。
 func (s *Service) Download(ctx context.Context, req *DownloadRequest) error {
 	if req == nil || req.LocalFolder == "" {
 		return invoker.NewAPIError(0, "InvalidArgument", "local_folder is required")
@@ -88,7 +95,12 @@ func (s *Service) Download(ctx context.Context, req *DownloadRequest) error {
 }
 
 func (s *Service) downloadRange(ctx context.Context, url, tmpPath, finalPath string, offset int64, onProgress func(int64, int64)) error {
-	hc := &http.Client{Timeout: 0}
+	// 不用整体 Timeout（会截断大文件 body 读取）。改用 ResponseHeaderTimeout 兜底：
+	// 只约束「等到服务器开始返回响应头」的时间；拿到头后 body 仍流式读取，
+	// 由调用方传入的 ctx 负责取消。
+	hc := &http.Client{Transport: &http.Transport{
+		ResponseHeaderTimeout: downloadHeaderTimeout,
+	}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err

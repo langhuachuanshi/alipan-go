@@ -81,6 +81,10 @@ func (s *Service) Create(ctx context.Context, req *CreateShareLinkRequest) (*Cre
 	if req == nil || len(req.FileIDList) == 0 {
 		return nil, invoker.NewAPIError(0, "InvalidArgument", "file_id_list is required")
 	}
+	// drive_id 为空时自动填默认网盘（服务端要求）。
+	if req.DriveID == "" {
+		req.DriveID = s.inv.DefaultDriveID()
+	}
 	var resp CreateShareLinkResponse
 	if err := invoker.PostAndDecode(ctx, s.inv, pathShareLinkCreate, req, &resp, []int{200}); err != nil {
 		return nil, err
@@ -144,11 +148,19 @@ type ListMyShareRequest struct {
 }
 
 // ListMyShare 列出我的分享，自动分页。
+//
+// 注意：阿里云盘服务端要求此接口必须带 creator=user_id，否则返回 403。
+// （接口注释说"不传查自己"，但实测不传会 403，故这里自动填充当前用户 ID。）
 func (s *Service) ListMyShare(ctx context.Context, req *ListMyShareRequest) ([]*types.ShareLinkSchema, error) {
+	if req == nil {
+		req = &ListMyShareRequest{}
+	}
 	body := map[string]any{
-		"limit":            defaultInt(req.Limit, 100),
-		"order_by":         defaultStr(req.OrderBy, "created_at"),
-		"order_direction":  defaultStr(string(req.OrderDirection), "DESC"),
+		"creator":           s.inv.UserID(), // 必填，否则 403
+		"limit":             defaultInt(req.Limit, 100),
+		"order_by":          defaultStr(req.OrderBy, "created_at"),
+		"order_direction":   defaultStr(string(req.OrderDirection), "DESC"),
+		"include_canceled":  false,
 	}
 	if req.Marker != "" {
 		body["marker"] = req.Marker

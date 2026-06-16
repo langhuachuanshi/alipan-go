@@ -30,7 +30,9 @@ const (
 const (
 	UserAgent = "AliApp(AYSD/5.8.0) com.alicloud.databox/37029260 Channel/36176927979800@rimet_android_5.8.0 language/zh-CN /Android Mobile/Xiaomi Redmi"
 	XCanary   = "client=Android,app=adrive,version=v5.8.0"
-	XSignature = "f4b7bed5d8524a04051bd2da876dd79afe922b8205226d23aafc1a9c591f72e7ee77578656e6c8588098dea1488ac2a1e0d8a816b021eaf5c36d101892180f79df655c5712b348c2a540ca136e6b22001"
+	// XSignature 取自 aligo 6.2.8 的 _X_SIGNATURE 常量（两段拼接）。
+	// 注意：旧版 aligo 源码值不同，必须用这个精确值，否则分享等接口会 403。
+	XSignature = "f4b7bed5d8524a04051bd2da876dd79afe922b8205226d65855d02b267422adb1e0d8a816b021eaf5c36d101892180f79df655c5712b348c2a540ca136e6b22001"
 )
 
 // LoginMethod 扫码登录的展示方式。

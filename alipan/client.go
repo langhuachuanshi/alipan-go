@@ -136,6 +136,13 @@ func (c *Client) AccessToken() string {
 	return c.token.GetAccessToken()
 }
 
+// UserID 返回当前用户 ID（分享列表接口的 creator 字段必需）。
+func (c *Client) UserID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token.GetUserIDStr()
+}
+
 // requestWithRetry 核心请求逻辑：注入 header、发送、401 自动刷新重试、退避。
 func (c *Client) requestWithRetry(ctx context.Context, method, fullURL string, body any, withAuth bool, extraHeaders map[string]string, okStatus []int) ([]byte, int, error) {
 	if len(okStatus) == 0 {

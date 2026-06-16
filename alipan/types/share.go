@@ -57,14 +57,15 @@ type ShareLinkSchema struct {
 	Status          string   `json:"status"`
 	FirstFile       *ShareLinkBaseFile `json:"first_file"`
 	IsSubscribed    bool     `json:"is_subscribed"`
-	NumOfSubscribers int64   `json:"num_of_subscribers"`
-	DisplayName     string   `json:"display_name"`
-	CurrentSyncStatus string `json:"current_sync_status"`
-	NextSyncStatus  string   `json:"next_sync_status"`
-	FullShareMsg    string   `json:"full_share_msg"`
-	ExStatus        string   `json:"ex_status"`
-	Popularity      int64    `json:"popularity"`
-	PopularityStr   string   `json:"popularity_str"`
+	NumOfSubscribers int64 `json:"num_of_subscribers"`
+	DisplayName      string `json:"display_name"`
+	// sync_status 服务端可能返回 number 或 string，用 any 兼容。
+	CurrentSyncStatus any `json:"current_sync_status"`
+	NextSyncStatus    any `json:"next_sync_status"`
+	FullShareMsg      string `json:"full_share_msg"`
+	ExStatus          any `json:"ex_status"`
+	Popularity        any `json:"popularity"`
+	PopularityStr     string `json:"popularity_str"`
 }
 
 // ShareItemInfo 匿名查询分享信息返回的文件摘要。

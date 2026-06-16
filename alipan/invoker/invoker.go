@@ -96,6 +96,8 @@ type Invoker interface {
 	DefaultDriveID() string
 	// AccessToken 返回当前 access_token（上传 proof_code 计算需要）。
 	AccessToken() string
+	// UserID 返回当前用户 ID（分享列表接口 creator 字段必需）。
+	UserID() string
 }
 
 // Decode 把响应字节解码到 out，空体不报错。

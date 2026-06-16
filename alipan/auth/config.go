@@ -1,0 +1,57 @@
+// Package auth 实现阿里云盘的登录认证，对应该 aligo 的 src/aligo/core/Auth.py。
+//
+// 职责：扫码登录（终端/网页）、refresh_token 直登、token 刷新、token 持久化。
+// 不持有长期 HTTP 状态——它产出 *types.Token，由主包 Client 负责后续请求。
+package auth
+
+import (
+	"github.com/langhuachuanshi/alipan-go/alipan/types"
+)
+
+// 阿里云盘 host 与常量（对应该 aligo Config.py）。
+const (
+	HostAPI     = "https://api.aliyundrive.com"
+	HostAuth    = "https://auth.aliyundrive.com"
+	HostPassport = "https://passport.aliyundrive.com"
+
+	ClientID      = "25dzX3vbYqktVxyX"
+	OAuthRedirect = "https://www.aliyundrive.com/sign/callback"
+	AppName       = "aliyun_drive"
+
+	PathAccountToken   = "/v2/account/token"
+	PathOAuthAuthorize = "/v2/oauth/authorize"
+	PathQrcodeGenerate = "/newlogin/qrcode/generate.do"
+	PathQrcodeQuery    = "/newlogin/qrcode/query.do"
+)
+
+// 固定 header（对应该 aligo UNI_HEADERS）。
+const (
+	UserAgent = "AliApp(AYSD/5.8.0) com.alicloud.databox/37029260 Channel/36176927979800@rimet_android_5.8.0 language/zh-CN /Android Mobile/Xiaomi Redmi"
+	XCanary   = "client=Android,app=adrive,version=v5.8.0"
+	XSignature = "f4b7bed5d8524a04051bd2da876dd79afe922b8205226d23aafc1a9c591f72e7ee77578656e6c8588098dea1488ac2a1e0d8a816b021eaf5c36d101892180f79df655c5712b348c2a540ca136e6b22001"
+)
+
+// LoginMethod 扫码登录的展示方式。
+type LoginMethod int
+
+const (
+	LoginTerminal LoginMethod = iota // 终端打印二维码
+	LoginWeb                         // 网页二维码
+)
+
+// Config auth 的配置。
+type Config struct {
+	Name          string        // 配置文件名（~/.aligo/<name>.json）
+	ConfigDir     string        // 配置目录，默认 ~/.aligo
+	RefreshToken  string        // 直接用 refresh_token 登录
+	Token         *types.Token  // 直接传入 token
+	DefaultDrive  string        // 默认网盘 ID
+	LoginMethod   LoginMethod
+	WebPort       int
+}
+
+// Result 是登录后的产物。
+type Result struct {
+	Token    *types.Token
+	DeviceID string
+}

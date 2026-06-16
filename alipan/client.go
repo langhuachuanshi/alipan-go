@@ -49,6 +49,10 @@ type Client struct {
 	deviceID string
 	config   clientConfig
 
+	// 缓存的资源盘 ID（快传分享需要）。
+	resourceDriveID string
+	resDriveMu      sync.Mutex // 保护 resourceDriveID 缓存（独立于 mu，避免死锁）
+
 	// 用于 401 刷新时避免并发重复刷新。
 	refreshMu sync.Mutex
 }
@@ -141,6 +145,34 @@ func (c *Client) UserID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.token.GetUserIDStr()
+}
+
+// ResourceDriveID 返回资源盘 ID（快传分享需要资源盘，备份盘不允许分享）。
+// 通过 list_my_drives 查找 category=resource 的 drive，结果缓存。
+// 若账号无资源盘，返回空串。
+func (c *Client) ResourceDriveID() string {
+	c.resDriveMu.Lock()
+	defer c.resDriveMu.Unlock()
+	if c.resourceDriveID != "" {
+		return c.resourceDriveID
+	}
+	// 查 list_my_drives 找资源盘（注意：不能持 token 的 mu 锁，否则与 Post→AccessToken 死锁）。
+	var resp struct {
+		Items []struct {
+			DriveID  string `json:"drive_id"`
+			Category string `json:"category"`
+			Name     string `json:"drive_name"`
+		} `json:"items"`
+	}
+	if err := invoker.PostAndDecode(context.Background(), c, "/v2/drive/list_my_drives", map[string]any{}, &resp, []int{200}); err == nil {
+		for _, it := range resp.Items {
+			if it.Category == "resource" || it.Name == "resource" {
+				c.resourceDriveID = it.DriveID
+				return it.DriveID
+			}
+		}
+	}
+	return ""
 }
 
 // requestWithRetry 核心请求逻辑：注入 header、发送、401 自动刷新重试、退避。

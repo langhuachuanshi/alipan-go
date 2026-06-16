@@ -98,6 +98,9 @@ type Invoker interface {
 	AccessToken() string
 	// UserID 返回当前用户 ID（分享列表接口 creator 字段必需）。
 	UserID() string
+	// ResourceDriveID 返回资源盘 ID（快传分享需要资源盘，备份盘不允许分享）。
+	// 若账号无资源盘，返回空串。
+	ResourceDriveID() string
 }
 
 // Decode 把响应字节解码到 out，空体不报错。

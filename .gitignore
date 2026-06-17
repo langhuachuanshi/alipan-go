@@ -1,16 +1,14 @@
 # 参考源码：aligo 的 Python 原版，仅供重写时对照，不纳入本仓库
 aligo-src/
 
-# 测试产物：二维码图片、token、临时文件、日志
+# 测试产物：编译出的 exe、二维码图片、token、临时文件、日志
+# 编译测试程序时统一输出到 tmp/ 下
 tmp/
 *.exe
-test_login.exe
+*.exe~
 *.log
-login.log
 
 # Go 构建产物
-*.exe
-*.exe~
 *.dll
 *.so
 *.dylib

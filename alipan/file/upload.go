@@ -42,7 +42,11 @@ type createFileResp struct {
 	Location     string                 `json:"location"`
 }
 
-// Upload 上传文件（含秒传、分片、续期）。
+// Upload 上传文件（含秒传、分片、断点续传）。
+//
+// 断点续传：上传中断后，再次调用 Upload 会自动从断点继续，不重头上传。
+// 进度按文件 SHA1 持久化到 ~/.aligo/.upload-<sha1>.json。
+// 文件内容变化（sha1 变）则视为新文件，从头上传。
 func (s *Service) Upload(ctx context.Context, req *UploadRequest) (*types.BaseFile, error) {
 	if req == nil || req.FilePath == "" {
 		return nil, invoker.NewAPIError(0, "InvalidArgument", "file_path is required")
@@ -57,11 +61,25 @@ func (s *Service) Upload(ctx context.Context, req *UploadRequest) (*types.BaseFi
 		name = filepath.Base(req.FilePath)
 	}
 	parentID := defaultStr(req.ParentFileID, "root")
+	driveID := req.DriveID
 
 	contentHash, preHash, err := computeSHA1Upper(req.FilePath)
 	if err != nil {
 		return nil, fmt.Errorf("alipan: compute sha1 failed: %w", err)
 	}
+
+	// —— 断点续传：检查是否有未完成的上传记录 ——
+	if prog := loadProgress(contentHash); prog != nil && prog.FileSize == fileSize && prog.FilePath == req.FilePath {
+		// 有匹配的进度记录，尝试续传。
+		f, err := s.resumeUpload(ctx, prog, req)
+		if err == nil {
+			return f, nil // 续传成功
+		}
+		// 续传失败（upload_id 失效等），删除记录，走全新上传。
+		removeProgress(contentHash)
+	}
+
+	// —— 全新上传（含秒传判断）——
 	proofCode := ""
 	if fileSize > 1024 {
 		proofCode, err = computeProofCode(s.inv.AccessToken(), req.FilePath, fileSize)
@@ -69,19 +87,69 @@ func (s *Service) Upload(ctx context.Context, req *UploadRequest) (*types.BaseFi
 			return nil, fmt.Errorf("alipan: compute proof_code failed: %w", err)
 		}
 	}
-
-	createResp, err := s.createFileWithRapid(ctx, name, parentID, req.DriveID, req.CheckNameMode,
+	createResp, err := s.createFileWithRapid(ctx, name, parentID, driveID, req.CheckNameMode,
 		fileSize, contentHash, preHash, proofCode)
 	if err != nil {
 		return nil, err
 	}
 	if createResp.RapidUpload || createResp.Exist {
-		return s.Get(ctx, createResp.FileID, req.DriveID)
+		removeProgress(contentHash)
+		return s.Get(ctx, createResp.FileID, driveID)
 	}
-	if err := s.uploadParts(ctx, req, createResp, fileSize); err != nil {
+
+	// 建立进度记录。
+	prog := &uploadProgress{
+		FilePath: req.FilePath, FileSize: fileSize, SHA1: contentHash,
+		DriveID: createResp.DriveID, FileID: createResp.FileID, UploadID: createResp.UploadID,
+		ParentFileID: parentID, Name: name, ChunkSize: chunkSize(fileSize),
+	}
+	saveProgress(prog)
+
+	if err := s.uploadPartsResume(ctx, req, createResp.PartInfoList, prog, fileSize); err != nil {
 		return nil, err
 	}
-	return s.completeUpload(ctx, createResp.FileID, createResp.UploadID, req.DriveID, createResp.PartInfoList)
+	f, err := s.completeUpload(ctx, createResp.FileID, createResp.UploadID, driveID, createResp.PartInfoList)
+	if err != nil {
+		return nil, err
+	}
+	removeProgress(contentHash) // 上传完成，清理进度
+	return f, nil
+}
+
+// resumeUpload 从进度记录续传：用记录的 upload_id 重新拿分片 URL，跳过已传分片。
+func (s *Service) resumeUpload(ctx context.Context, prog *uploadProgress, req *UploadRequest) (*types.BaseFile, error) {
+	// 计算全部分片号。
+	partCount := int((prog.FileSize + prog.ChunkSize - 1) / prog.ChunkSize)
+	allParts := make([]types.UploadPartInfo, partCount)
+	for i := 0; i < partCount; i++ {
+		allParts[i] = types.UploadPartInfo{PartNumber: i + 1}
+	}
+	// 用记录的 upload_id 重新获取各分片 URL。
+	body := map[string]any{
+		"drive_id":       prog.DriveID,
+		"file_id":        prog.FileID,
+		"upload_id":      prog.UploadID,
+		"part_info_list": allParts,
+	}
+	var resp struct {
+		PartInfoList []types.UploadPartInfo `json:"part_info_list"`
+	}
+	if err := invoker.PostAndDecode(ctx, s.inv, pathFileGetUploadURL, body, &resp, []int{200}); err != nil {
+		return nil, err
+	}
+	if len(resp.PartInfoList) == 0 {
+		return nil, fmt.Errorf("alipan: resume get_upload_url returned empty")
+	}
+	// 调用统一的分片上传（会跳过已传的）。
+	if err := s.uploadPartsResume(ctx, req, resp.PartInfoList, prog, prog.FileSize); err != nil {
+		return nil, err
+	}
+	f, err := s.completeUpload(ctx, prog.FileID, prog.UploadID, prog.DriveID, resp.PartInfoList)
+	if err != nil {
+		return nil, err
+	}
+	removeProgress(prog.SHA1)
+	return f, nil
 }
 
 func (s *Service) createFileWithRapid(ctx context.Context, name, parentID, driveID string,
@@ -130,26 +198,43 @@ func (s *Service) createFileWithRapid(ctx context.Context, name, parentID, drive
 	return &resp, nil
 }
 
-func (s *Service) uploadParts(ctx context.Context, req *UploadRequest, createResp *createFileResp, fileSize int64) error {
+// uploadPartsResume 上传分片，支持断点续传：跳过 prog.DoneParts 中已记录的分片，
+// 每传完一片立即更新进度记录。
+func (s *Service) uploadPartsResume(ctx context.Context, req *UploadRequest, parts []types.UploadPartInfo, prog *uploadProgress, fileSize int64) error {
 	f, err := os.Open(req.FilePath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	csize := chunkSize(fileSize)
-	var sent int64
-	if req.OnProgress != nil {
-		req.OnProgress(0, fileSize)
+	csize := prog.ChunkSize
+	if csize == 0 {
+		csize = chunkSize(fileSize)
 	}
-	for i, part := range createResp.PartInfoList {
+	// 已传字节数（用于进度回调）。
+	doneBytes := int64(len(prog.DoneParts)) * csize
+	if doneBytes > fileSize {
+		doneBytes = fileSize
+	}
+	if req.OnProgress != nil {
+		req.OnProgress(doneBytes, fileSize)
+	}
+	for i, part := range parts {
 		if part.UploadURL == "" {
+			continue
+		}
+		// 跳过已传分片（断点续传核心）。
+		if containsPart(prog.DoneParts, part.PartNumber) {
 			continue
 		}
 		partSize := csize
 		remaining := fileSize - int64(i)*csize
 		if remaining < partSize {
 			partSize = remaining
+		}
+		// 定位到该分片偏移读取（不能顺序读，因为可能跳过了前面的）。
+		if _, err := f.Seek(int64(i)*csize, io.SeekStart); err != nil {
+			return fmt.Errorf("alipan: seek part %d failed: %w", part.PartNumber, err)
 		}
 		buf := make([]byte, partSize)
 		if _, err := io.ReadFull(f, buf); err != nil {
@@ -158,7 +243,7 @@ func (s *Service) uploadParts(ctx context.Context, req *UploadRequest, createRes
 		uploadURL := part.UploadURL
 		if err := s.putPart(ctx, uploadURL, buf); err != nil {
 			if is403(err) {
-				newURL, rerr := s.renewUploadURL(ctx, createResp.DriveID, createResp.FileID, createResp.UploadID, part.PartNumber)
+				newURL, rerr := s.renewUploadURL(ctx, prog.DriveID, prog.FileID, prog.UploadID, part.PartNumber)
 				if rerr != nil {
 					return rerr
 				}
@@ -169,9 +254,12 @@ func (s *Service) uploadParts(ctx context.Context, req *UploadRequest, createRes
 				return fmt.Errorf("alipan: upload part %d failed: %w", part.PartNumber, err)
 			}
 		}
-		sent += int64(len(buf))
+		// 该分片传完，记录进度（断点续传的关键持久化）。
+		prog.DoneParts = append(prog.DoneParts, part.PartNumber)
+		saveProgress(prog)
+		doneBytes += int64(len(buf))
 		if req.OnProgress != nil {
-			req.OnProgress(sent, fileSize)
+			req.OnProgress(doneBytes, fileSize)
 		}
 	}
 	return nil
